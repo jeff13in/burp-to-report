@@ -1,0 +1,38 @@
+[
+ {
+  "id": "idor-user",
+  "vuln_class": "idor",
+  "path": "/api/users/1002"
+ },
+ {
+  "id": "idor-order",
+  "vuln_class": "idor",
+  "path": "/api/orders/5002"
+ },
+ {
+  "id": "noauth-admin",
+  "vuln_class": "missing_authorization",
+  "path": "/api/admin/users"
+ },
+ {
+  "id": "xss-search",
+  "vuln_class": "reflected_input",
+  "path": "/search",
+  "query_contains": "%3Cb%3E"
+ },
+ {
+  "id": "error-cart",
+  "vuln_class": "verbose_error",
+  "path": "/api/cart"
+ },
+ {
+  "id": "hash-me",
+  "vuln_class": "sensitive_data_exposure",
+  "path": "/api/me"
+ },
+ {
+  "id": "cors-account",
+  "vuln_class": "cors_misconfiguration",
+  "path": "/api/account"
+ }
+]
