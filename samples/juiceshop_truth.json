@@ -1,0 +1,55 @@
+[
+ {
+  "id": "idor-basket",
+  "vuln_class": "idor",
+  "path": "/rest/basket/{other_bid}",
+  "note": "Juice Shop 'View Basket' challenge: user A reads user B's basket by changing the id"
+ },
+ {
+  "id": "users-list",
+  "vuln_class": [
+   "missing_authorization",
+   "sensitive_data_exposure",
+   "idor"
+  ],
+  "path": "/api/Users",
+  "note": "Any logged-in customer can list every account (emails, roles); only the admin page should"
+ },
+ {
+  "id": "sqlite-error",
+  "vuln_class": "verbose_error",
+  "path": "/rest/products/search",
+  "query_contains": "%27%3B",
+  "note": "A quote in the search box returns the raw SQLITE_ERROR and query"
+ },
+ {
+  "id": "error-handling",
+  "vuln_class": "verbose_error",
+  "path": "/rest/qwertz",
+  "note": "Juice Shop 'Error Handling' challenge: unknown REST route returns a stack trace"
+ },
+ {
+  "id": "ftp-listing",
+  "vuln_class": [
+   "sensitive_data_exposure",
+   "missing_authorization"
+  ],
+  "path": "/ftp",
+  "note": "Juice Shop 'Confidential Document' challenge: open directory listing of internal files"
+ },
+ {
+  "id": "metrics",
+  "vuln_class": [
+   "sensitive_data_exposure",
+   "missing_authorization"
+  ],
+  "path": "/metrics",
+  "note": "Juice Shop 'Exposed Metrics' challenge: Prometheus metrics with no auth"
+ },
+ {
+  "id": "jwt-password-hash",
+  "vuln_class": "sensitive_data_exposure",
+  "path": "/rest/user/login",
+  "note": "The login token's payload contains the user's MD5 password hash"
+ }
+]

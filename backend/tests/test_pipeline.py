@@ -54,6 +54,16 @@ def test_clean_drops_static_and_duplicates():
     assert all(not e.path.startswith("/static") for e in kept)
 
 
+def test_clean_keeps_same_url_from_different_sessions():
+    def entry(token):
+        return {"request": {"method": "GET", "url": "https://a.test/rest/basket/9",
+                            "headers": [{"name": "Authorization", "value": f"Bearer {token}"}]},
+                "response": {"status": 200, "headers": [], "content": {"mimeType": "application/json", "text": "{}"}}}
+    har = json.dumps({"log": {"entries": [entry("bob"), entry("alice"), entry("alice")]}})
+    kept, stats = clean(parse_export(har, "x.har"))
+    assert len(kept) == 2 and stats["duplicate"] == 1
+
+
 def test_path_template():
     assert path_template("/api/users/42/orders") == "/api/users/{id}/orders"
 

@@ -28,7 +28,8 @@ def in_scope(ex: HttpExchange, scope: list[str]) -> bool:
 
 
 def clean(exchanges: list[HttpExchange], scope: list[str] | None = None) -> tuple[list[HttpExchange], dict]:
-    """Drop static and out-of-scope traffic. Exact duplicates (same method, URL, body, status) are collapsed.
+    """Drop static and out-of-scope traffic. Exact duplicates (same method, URL, body, status, credentials)
+    are collapsed. Two users requesting the same URL are not duplicates: that is what IDOR looks like.
     Distinct IDs on the same template are kept on purpose: the IDOR detector needs them."""
     scope = scope or []
     stats = {"total": len(exchanges), "static": 0, "out_of_scope": 0, "duplicate": 0}
@@ -41,7 +42,7 @@ def clean(exchanges: list[HttpExchange], scope: list[str] | None = None) -> tupl
         if is_static(ex):
             stats["static"] += 1
             continue
-        key = (ex.method, ex.url, ex.request_body, ex.status, bool(_auth(ex)))
+        key = (ex.method, ex.url, ex.request_body, ex.status, _auth(ex))
         if key in seen:
             stats["duplicate"] += 1
             continue

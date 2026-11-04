@@ -101,6 +101,9 @@ ERROR_PATTERNS = [
     r"SQLSTATE\[\w+\]",
     r"ORA-\d{5}",
     r"You have an error in your SQL syntax",
+    r"SQLITE_ERROR",
+    r"syntax error at or near \"",
+    r"PG::\w+Error",
     r"System\.\w+Exception",
     r"Fatal error: .+ in /[\w/.-]+ on line \d+",
     r"(?:Django|Laravel|Express) (?:debug|version) [\d.]+",
@@ -210,7 +213,7 @@ def detect_idor(exchanges: list[HttpExchange]) -> list[Signal]:
                 score=0.85,
             ))
 
-    owner_re = re.compile(r"\"(?:owner_?id|user_?id|account_?id|email)\"\s*:\s*\"?([^\",}]+)")
+    owner_re = re.compile(r"\"(?:owner_?id|user_?id|account_?id|email)\"\s*:\s*\"?([^\",}]+)", re.I)
     flagged = {i for s in out for i in s.exchange_ids}
     for (method, tmpl, _), group in by_route.items():
         ok = [e for e in group if 200 <= e.status < 300 and e.id not in flagged]

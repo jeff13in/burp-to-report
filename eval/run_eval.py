@@ -25,7 +25,8 @@ from app.rag import Retriever  # noqa: E402
 
 def match(finding, exchanges_by_id, truth) -> str | None:
     for t in truth:
-        if finding.vuln_class.value != t["vuln_class"]:
+        classes = t["vuln_class"] if isinstance(t["vuln_class"], list) else [t["vuln_class"]]
+        if finding.vuln_class.value not in classes:
             continue
         for eid in finding.exchange_ids:
             ex = exchanges_by_id.get(eid)
