@@ -5,6 +5,7 @@ always accurate. Credentials are redacted.
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
 from .models import Finding, HttpExchange, Status
@@ -21,18 +22,36 @@ STEP_HINTS = {
 }
 
 
+def _fence(text: str, lang: str = "") -> str:
+    """Code block that captured traffic cannot break out of, whatever backticks it contains."""
+    ticks = "`" * max(3, max((len(r) for r in re.findall(r"`+", text)), default=0) + 1)
+    return f"{ticks}{lang}\n{text}\n{ticks}"
+
+
+def _code(text: str) -> str:
+    """Inline code span, safe for text containing backticks or newlines."""
+    text = " ".join(text.split())
+    ticks = "`" * (max((len(r) for r in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
+def _cell(text: str) -> str:
+    return " ".join(text.split()).replace("|", "\\|")
+
+
 def _request_block(ex: HttpExchange) -> str:
-    return "```http\n" + redact(ex.request_text())[:2000] + "\n```"
+    return _fence(redact(ex.request_text())[:2000], "http")
 
 
 def finding_markdown(f: Finding, by_id: dict[int, HttpExchange], retriever: Retriever) -> str:
     exs = [by_id[i] for i in f.exchange_ids if i in by_id]
     lines = [
-        f"## {f.title}",
+        f"## {' '.join(f.title.split())}",
         "",
         f"**Severity:** {f.severity.value.capitalize()}  ",
         f"**Class:** {f.vuln_class.value.replace('_', ' ')}  ",
-        f"**Endpoint:** `{f.endpoint}`  ",
+        f"**Endpoint:** {_code(f.endpoint)}  ",
         f"**Confidence (tool):** {f.confidence:.0%}",
         "",
         "### Summary",
@@ -47,7 +66,7 @@ def finding_markdown(f: Finding, by_id: dict[int, HttpExchange], retriever: Retr
                   f"   The server responded with **HTTP {ex.status}**."]
         n += 1
     lines.append(f"{n}. {STEP_HINTS.get(f.vuln_class.value, 'Observe the response.')}")
-    lines += ["", "### Evidence", *[f"- `{e[:200]}`" for e in f.evidence], ""]
+    lines += ["", "### Evidence", *[f"- {_code(redact(e)[:200])}" for e in f.evidence], ""]
     lines += ["### Remediation", f.remediation, ""]
     if f.references:
         titles = [retriever.get(r).title if retriever.get(r) else r for r in f.references]
@@ -69,7 +88,7 @@ def build_report(project: dict, retriever: Retriever, include_pending: bool = Fa
         "",
         "| # | Severity | Title |",
         "|---|----------|-------|",
-        *[f"| {i} | {f.severity.value.capitalize()} | {f.title} |" for i, f in enumerate(findings, 1)],
+        *[f"| {i} | {f.severity.value.capitalize()} | {_cell(f.title)} |" for i, f in enumerate(findings, 1)],
         "",
         "---",
         "",

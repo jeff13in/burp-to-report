@@ -11,7 +11,7 @@ import html
 import json
 import re
 from collections import defaultdict
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 
 from .filters import ID_SEGMENT, path_template
 from .models import HttpExchange, Signal, VulnClass
@@ -165,7 +165,8 @@ def detect_cors(exchanges: list[HttpExchange]) -> list[Signal]:
             continue
         creds = (ex.header("Access-Control-Allow-Credentials") or "").lower() == "true"
         origin = ex.header("Origin", response=False)
-        reflected = origin and acao == origin and ex.host not in origin
+        # Compare hostnames exactly: a substring check would trust https://shop.test.evil.example.
+        reflected = bool(origin) and acao == origin and (urlsplit(origin).hostname or "") != ex.host
         if (reflected or acao == "null") and creds:
             out.append(Signal(
                 vuln_class=VulnClass.CORS,
@@ -186,6 +187,30 @@ def detect_cors(exchanges: list[HttpExchange]) -> list[Signal]:
     return out
 
 
+USER_COLLECTIONS = {"users", "user", "accounts", "account", "profiles", "profile",
+                    "customers", "customer", "members", "member"}
+
+
+def _session_user(claims: dict) -> str:
+    """The user id a JWT belongs to: top-level sub/user_id/uid, or id nested under data/user."""
+    for key in ("sub", "user_id", "userId", "uid"):
+        if claims.get(key):
+            return str(claims[key])
+    for wrapper in ("data", "user"):
+        nested = claims.get(wrapper)
+        if isinstance(nested, dict) and nested.get("id") is not None:
+            return str(nested["id"])
+    return ""
+
+
+def _user_object_ids(path: str) -> list[str]:
+    """Ids that name a user-type object, e.g. 42 in /api/Users/42 or /accounts/42/settings.
+    Other object ids (orders, baskets) can't be compared with the session's user id."""
+    segs = path.split("/")
+    return [seg for prev, seg in zip(segs, segs[1:])
+            if prev.lower() in USER_COLLECTIONS and ID_SEGMENT.match(seg)]
+
+
 def detect_idor(exchanges: list[HttpExchange]) -> list[Signal]:
     """Two patterns:
     1. The session's own user id (JWT 'sub' or 'user_id') differs from the object id in the path,
@@ -202,9 +227,9 @@ def detect_idor(exchanges: list[HttpExchange]) -> list[Signal]:
             continue
         by_route[(ex.method, path_template(ex.path), _auth_value(ex))].append(ex)
 
-        claims = _jwt_claims(ex)
-        me = str(claims.get("sub") or claims.get("user_id") or claims.get("uid") or "")
-        if me and 200 <= ex.status < 300 and "/users/" in ex.path.lower() and me not in ids:
+        me = _session_user(_jwt_claims(ex))
+        user_ids = _user_object_ids(ex.path)
+        if me and 200 <= ex.status < 300 and user_ids and me not in user_ids:
             out.append(Signal(
                 vuln_class=VulnClass.IDOR,
                 exchange_ids=[ex.id],

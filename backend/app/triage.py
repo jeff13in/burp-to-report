@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import re
 import uuid
+from urllib.parse import unquote_plus
 
 from .filters import path_template
 from .llm import LLMClient, LLMError
@@ -59,29 +60,81 @@ Return a JSON object with exactly these keys:
  "title": str, "rationale": str (2-4 sentences), "impact": str (1-2 sentences),
  "evidence": [str], "references": [str], "remediation": str}"""
 
-SECRET_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization"}
+SECRET_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization",
+                  "x-auth-token", "x-access-token", "x-csrf-token", "x-xsrf-token"}
 MAX_CHARS = 3500
+
+# Field names whose values are credentials, in JSON bodies and in query/form parameters.
+_SECRET_KEYS = (r"password|passwd|pwd|pass|new_?password|current_?password|password_?hash|"
+                r"secret|client_?secret|api_?key|apikey|access_?token|refresh_?token|id_?token|"
+                r"auth_?token|token|session_?id|sessionid|private_?key|totp_?secret|otp")
+JSON_SECRET = re.compile(rf'("(?:{_SECRET_KEYS})"\s*:\s*")((?:[^"\\]|\\.)+)(")', re.I)
+PARAM_SECRET = re.compile(rf"((?:^|[?&\s])(?:{_SECRET_KEYS})=)([^&\s]+)", re.I)
+JWT = re.compile(r"eyJ[\w-]+\.([\w-]+)\.[\w-]*")
+AWS_KEY = re.compile(r"AKIA[0-9A-Z]{16}")
+PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 
 
 def _mask(value: str) -> str:
     return f"<redacted:{hashlib.sha256(value.encode()).hexdigest()[:8]}>"
 
 
+def _mask_secret(value: str) -> str:
+    """Mask a credential. If it contains a JWT, keep the payload readable (see redact)."""
+    if value.startswith("<redacted:"):
+        return value
+    masked = _mask(value.strip())
+    jwt = JWT.search(value)
+    if jwt:
+        masked += f" (jwt payload: {jwt.group(1)})"
+    return masked
+
+
+def _redact_inline(line: str) -> str:
+    line = JSON_SECRET.sub(lambda m: m.group(1) + _mask_secret(m.group(2)) + m.group(3), line)
+    line = PARAM_SECRET.sub(lambda m: m.group(1) + _mask_secret(m.group(2)), line)
+    line = JWT.sub(lambda m: _mask_secret(m.group(0)), line)
+    return AWS_KEY.sub(lambda m: _mask(m.group(0)), line)
+
+
 def redact(text: str) -> str:
-    """Mask credentials before traffic leaves the machine. The hash keeps sessions distinguishable
-    (same token -> same placeholder) without revealing the token. JWT payload claims stay readable
-    because they identify the user the session belongs to, which IDOR review needs."""
+    """Mask credentials before traffic leaves the machine: secret headers, secret fields in JSON
+    bodies and query/form parameters, bare JWTs, AWS keys and private keys. The hash keeps values
+    distinguishable (same token -> same placeholder) without revealing them. JWT payload claims stay
+    readable because they identify the user the session belongs to, which IDOR review needs."""
+    text = PEM.sub(lambda m: "-----BEGIN PRIVATE KEY----- " + _mask(m.group(0)), text)
     out = []
     for line in text.split("\n"):
         name, sep, value = line.partition(":")
         if sep and name.strip().lower() in SECRET_HEADERS:
-            jwt = re.search(r"eyJ[\w-]+\.([\w-]+)\.[\w-]+", value)
-            masked = _mask(value.strip())
-            if jwt:
-                masked += f" (jwt payload: {jwt.group(1)})"
-            line = f"{name}: {masked}"
+            line = f"{name}: {_mask_secret(value.strip())}"
+        else:
+            line = _redact_inline(line)
         out.append(line)
     return "\n".join(out)
+
+
+MIN_SCRUB_LEN = 5  # shorter values would mask ordinary words
+
+
+def secret_values(text: str) -> set[str]:
+    """Credential values found in raw traffic (secret headers, secret fields). Used to mask the same
+    values wherever else they appear, e.g. a password reflected into an HTML page."""
+    found = set()
+    for line in text.split("\n"):
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() in SECRET_HEADERS:
+            found.add(value.strip())
+    found |= {m.group(2) for m in JSON_SECRET.finditer(text)}
+    for m in PARAM_SECRET.finditer(text):
+        found |= {m.group(2), unquote_plus(m.group(2))}
+    return {v for v in found if len(v) >= MIN_SCRUB_LEN}
+
+
+def scrub(text: str, secrets: set[str]) -> str:
+    for v in sorted(secrets, key=len, reverse=True):
+        text = text.replace(v, _mask(v.strip()))
+    return text
 
 
 def _render_exchange(ex: HttpExchange) -> str:
@@ -99,14 +152,21 @@ def validate(result: dict, traffic: str, allowed_refs: set[str]) -> tuple[list[s
     notes = []
     corpus = _norm(traffic)
     evidence = []
-    for e in result.get("evidence") or []:
-        if isinstance(e, str) and e.strip() and _norm(e) in corpus:
+    raw_evidence = result.get("evidence")
+    if not isinstance(raw_evidence, list):
+        if raw_evidence:
+            notes.append("Dropped evidence: model did not return a list")
+        raw_evidence = []
+    for e in raw_evidence:
+        # Very short quotes ("200", "id") match almost any traffic and prove nothing.
+        if isinstance(e, str) and len(_norm(e)) >= 4 and _norm(e) in corpus:
             evidence.append(e.strip())
         else:
             notes.append(f"Dropped evidence not found verbatim in traffic: {str(e)[:80]!r}")
     refs = []
-    for r in result.get("references") or []:
-        if r in allowed_refs:
+    raw_refs = result.get("references")
+    for r in raw_refs if isinstance(raw_refs, list) else []:
+        if isinstance(r, str) and r in allowed_refs:
             refs.append(r)
         else:
             notes.append(f"Dropped citation to unknown reference {r!r}")
@@ -155,14 +215,23 @@ class Triage:
         traffic = "\n".join(_render_exchange(e) for e in exs)
         ref_block = "\n\n".join(f"[{d.id}] {d.text}" for d in docs)
         user = (f"HEURISTIC SIGNAL: {sig.vuln_class.value}: {sig.reason}\n"
-                f"Heuristic evidence: {sig.evidence}\n\n"
+                f"Heuristic evidence: {[redact(e) for e in sig.evidence]}\n\n"
                 f"REFERENCE DOCUMENTS (cite by id):\n{ref_block}\n\nTRAFFIC:\n{traffic}")
+        secrets = secret_values("\n".join(e.request_text() + "\n" + e.response_text() for e in exs))
+        user = scrub(user, secrets)
+        traffic = scrub(traffic, secrets)  # validation must see the same text the model saw
         try:
             async with self.sem:
                 result = await self.llm.chat_json(SYSTEM_PROMPT, user)
         except (LLMError, ValueError) as e:
             return heuristic_finding(sig, exs, ref_ids[:2], f"Model unavailable ({e.__class__.__name__}); heuristic fallback."), None
+        try:
+            return self._finding_from_model(sig, exs, result, traffic, ref_ids)
+        except Exception as e:  # malformed model output must not abort the whole analysis
+            return heuristic_finding(sig, exs, ref_ids[:2], f"Model reply unusable ({e.__class__.__name__}); heuristic fallback."), None
 
+    def _finding_from_model(self, sig: Signal, exs: list[HttpExchange], result: dict, traffic: str,
+                            ref_ids: list[str]) -> tuple[Finding | None, dict | None]:
         evidence, refs, notes = validate(result, traffic, set(ref_ids))
         try:
             confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))

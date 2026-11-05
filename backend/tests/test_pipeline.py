@@ -90,6 +90,72 @@ def test_redact_masks_tokens_but_keeps_jwt_claims():
     assert redact(text) == out  # deterministic placeholders
 
 
+def test_redact_masks_secrets_in_bodies_and_query():
+    jwt = "eyJhbGc.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"
+    text = ("POST /login?api_key=k3y123&q=shoes HTTP/1.1\nContent-Type: application/json\n\n"
+            '{"email": "a@x.test", "password": "hunter2"}\n'
+            f'{{"authentication":{{"token":"{jwt}"}}}}\n'
+            "email=a%40x.test&password=hunter2\nid AKIAABCDEFGHIJKLMNOP\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
+    out = redact(text)
+    for secret in ("hunter2", "k3y123", "c2lnbmF0dXJl", "AKIAABCDEFGHIJKLMNOP", "MIIEow"):
+        assert secret not in out
+    assert "q=shoes" in out and '"email": "a@x.test"' in out  # non-secret fields untouched
+    assert "eyJzdWIiOiIxIn0" in out  # jwt claims still readable
+    assert redact(text) == out
+
+
+def test_model_prompt_has_no_body_secrets():
+    def handler(req):
+        user = json.loads(req.content)["messages"][1]["content"]
+        assert "s3cr3t-pass" not in user and "c2lnbmF0dXJl" not in user
+        return reply({"is_vulnerability": False, "confidence": 0.9, "rationale": "x"})
+    entry = {"request": {"method": "POST", "url": "https://a.test/api/login",
+                         "headers": [{"name": "Content-Type", "value": "application/json"}],
+                         "postData": {"text": '{"password": "s3cr3t-pass"}'}},
+             "response": {"status": 200, "headers": [{"name": "Content-Type", "value": "text/html"}],
+                          "content": {"mimeType": "text/html",
+                                      "text": '<p>s3cr3t-pass</p>{"token": "eyJhbGc.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"}'}}}
+    har = json.dumps({"log": {"entries": [entry]}})
+    result = asyncio.run(analyze(har, "x.har", llm_with(handler), Retriever.from_dir()))
+    assert result["stats"]["signals"] >= 1
+
+
+def _har(entries) -> str:
+    def entry(url, req_headers, resp_headers, body="{}"):
+        return {"request": {"method": "GET", "url": url,
+                            "headers": [{"name": k, "value": v} for k, v in req_headers.items()]},
+                "response": {"status": 200, "headers": [{"name": k, "value": v} for k, v in resp_headers.items()],
+                             "content": {"mimeType": "application/json", "text": body}}}
+    return json.dumps({"log": {"entries": [entry(*e) for e in entries]}})
+
+
+def test_cors_suffix_origin_is_flagged_but_same_origin_is_not():
+    creds = {"Access-Control-Allow-Credentials": "true"}
+    har = _har([
+        ("https://shop.test/api/me", {"Origin": "https://shop.test.evil.example", "Cookie": "s=1"},
+         {"Access-Control-Allow-Origin": "https://shop.test.evil.example", **creds}),
+        ("https://shop.test/api/cart", {"Origin": "https://shop.test", "Cookie": "s=1"},
+         {"Access-Control-Allow-Origin": "https://shop.test", **creds}),
+    ])
+    sigs = [s for s in run_detectors(parse_export(har)) if s.vuln_class == VulnClass.CORS]
+    assert [s.exchange_ids for s in sigs] == [[0]]
+
+
+def test_idor_on_user_collections_and_nested_jwt_id():
+    def bearer(claims):
+        b64 = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+        return {"Authorization": f"Bearer {b64({'alg': 'RS256'})}.{b64(claims)}.sig"}
+    har = _har([
+        ("https://a.test/api/accounts/7/settings", bearer({"sub": "3"}), {}),
+        ("https://a.test/api/Users/9", bearer({"data": {"id": 3, "email": "a@x.test"}}), {}),
+        ("https://a.test/api/Users/3", bearer({"data": {"id": 3}}), {}),     # own object
+        ("https://a.test/api/orders/7", bearer({"sub": "3"}), {}),           # not a user object
+    ])
+    sigs = [s for s in run_detectors(parse_export(har)) if s.vuln_class == VulnClass.IDOR]
+    assert sorted(i for s in sigs for i in s.exchange_ids) == [0, 1]
+
+
 def test_validate_drops_fabricated_evidence_and_citations():
     traffic = 'HTTP/1.1 200\n{"email": "bob@x.test"}'
     ev, refs, notes = validate({"evidence": ['"email": "bob@x.test"', "made up line"],
@@ -148,3 +214,51 @@ def test_api_end_to_end(monkeypatch):
     md = c.get(f"/api/projects/{p['id']}/report").text
     assert "## " in md and "Steps to reproduce" in md and "Bearer eyJ" not in md
     assert c.post("/api/projects", files={"file": ("x.txt", "nope")}).status_code == 400
+
+
+# ---------------- hardening against malformed model output and uploads
+
+def test_validate_rejects_non_list_evidence_and_bad_refs():
+    ev, refs, notes = validate({"evidence": "zzz HTTP", "references": [{"a": 1}, "idor"]}, "HTTP/1.1 200", {"idor"})
+    assert ev == [] and refs == ["idor"] and notes
+    ev, _, _ = validate({"evidence": ["200", "HTTP/1.1 200"]}, "HTTP/1.1 200", set())
+    assert ev == ["HTTP/1.1 200"]  # too-short quotes prove nothing
+
+
+def test_extract_json_requires_object():
+    with pytest.raises(ValueError):
+        extract_json('[{"a": 1}]')
+
+
+def test_odd_model_reply_falls_back_instead_of_crashing():
+    handler = lambda r: reply({"is_vulnerability": True, "references": [{"x": 1}], "evidence": {"a": 1},
+                               "confidence": "high", "severity": ["x"]})
+    result = asyncio.run(analyze(SAMPLE, "s.har", llm_with(handler), Retriever.from_dir()))
+    assert result["findings"] and all(f.confidence <= 0.6 for f in result["findings"])
+
+
+@pytest.mark.parametrize("bad", ['{"log":{"entries":[{"request":{"headers":[{"x":1}]}}]}}',
+                                 '{"log":{"entries":[1]}}', '{"log":{"entries":{}}}',
+                                 '{"log":{"entries":[{"response":{"status":"abc"}}]}}'])
+def test_malformed_har_is_a_parse_error(bad):
+    with pytest.raises(ParseError):
+        parse_export(bad, "x.har")
+
+
+def test_report_redacts_evidence_and_cannot_be_broken_by_backticks():
+    from app.models import Finding, Severity, Status
+    from app.report import build_report
+    f = Finding(id="f", vuln_class=VulnClass.SENSITIVE_DATA, title="Leak | in table", severity=Severity.HIGH,
+                confidence=0.9, endpoint="GET a.test/x", exchange_ids=[], rationale="r",
+                evidence=['"password": "hunter22"', "a ``` b `c`"], status=Status.ACCEPTED)
+    md = build_report({"name": "t", "exchanges": [], "findings": [f]}, Retriever.from_dir())
+    assert "hunter22" not in md and "Leak \\| in table" in md
+    assert "- ```` a ``` b `c` ````" in md
+
+
+def test_project_ids_are_unguessable_and_bounded(monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "PROJECTS", {})
+    for _ in range(main.MAX_PROJECTS + 3):
+        p = main._store("x", {"exchanges": [], "findings": [], "suppressed": [], "stats": {}})
+    assert len(p["id"]) == 32 and len(main.PROJECTS) == main.MAX_PROJECTS

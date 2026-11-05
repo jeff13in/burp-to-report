@@ -25,6 +25,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allo
 retriever = Retriever.from_dir()
 llm = LLMClient()
 PROJECTS: dict[str, dict] = {}  # in-memory; traffic is sensitive, so nothing is written to disk
+MAX_PROJECTS = 20  # each holds up to 50 MB of traffic; the oldest is dropped beyond this
+
+
+def _store(name: str, result: dict) -> dict:
+    # Full 128-bit id: the id is the only thing standing between a project and anyone who can reach the port.
+    pid = uuid.uuid4().hex
+    PROJECTS[pid] = {"id": pid, "name": name, **result}
+    while len(PROJECTS) > MAX_PROJECTS:
+        PROJECTS.pop(next(iter(PROJECTS)))
+    return PROJECTS[pid]
 
 
 def _project(pid: str) -> dict:
@@ -50,9 +60,7 @@ async def create_project(file: UploadFile = File(...), name: str = Form("Untitle
                                llm, retriever, [s.strip() for s in scope.split(",") if s.strip()])
     except ParseError as e:
         raise HTTPException(400, str(e))
-    pid = uuid.uuid4().hex[:8]
-    PROJECTS[pid] = {"id": pid, "name": name, **result}
-    return _summary(PROJECTS[pid])
+    return _summary(_store(name, result))
 
 
 def _summary(p: dict) -> dict:
@@ -70,9 +78,7 @@ async def demo():
     if not SAMPLE.exists():
         raise HTTPException(404, "sample missing: run python eval/make_sample.py")
     result = await analyze(SAMPLE.read_text(), SAMPLE.name, llm, retriever)
-    pid = uuid.uuid4().hex[:8]
-    PROJECTS[pid] = {"id": pid, "name": "ShopLab demo", **result}
-    return _summary(PROJECTS[pid])
+    return _summary(_store("ShopLab demo", result))
 
 
 @app.get("/api/projects/{pid}")

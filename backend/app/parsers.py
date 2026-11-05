@@ -83,29 +83,38 @@ def parse_har(data: str) -> list[HttpExchange]:
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise ParseError(f"Not a valid HAR file: {e}") from e
 
+    if not isinstance(entries, list):
+        raise ParseError("Not a valid HAR file: log.entries is not a list")
     out: list[HttpExchange] = []
     for i, e in enumerate(entries):
-        req, resp = e.get("request", {}), e.get("response", {})
-        content = resp.get("content", {}) or {}
-        body = content.get("text", "") or ""
-        if content.get("encoding") == "base64":
-            body = _decode(body, True)
-        parts = urlsplit(req.get("url", ""))
-        out.append(HttpExchange(
-            id=i,
-            method=req.get("method", "GET").upper(),
-            url=req.get("url", ""),
-            host=parts.hostname or "",
-            path=parts.path or "/",
-            query=parts.query,
-            request_headers={h["name"]: h["value"] for h in req.get("headers", [])},
-            request_body=((req.get("postData") or {}).get("text") or "")[:MAX_BODY],
-            status=int(resp.get("status", 0) or 0),
-            response_headers={h["name"]: h["value"] for h in resp.get("headers", [])},
-            response_body=body[:MAX_BODY],
-            mime=(content.get("mimeType") or "").lower(),
-        ))
+        try:
+            out.append(_har_entry(i, e))
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            raise ParseError(f"Malformed HAR entry #{i}: {err.__class__.__name__}") from err
     return out
+
+
+def _har_entry(i: int, e: dict) -> HttpExchange:
+    req, resp = e.get("request", {}), e.get("response", {})
+    content = resp.get("content", {}) or {}
+    body = content.get("text", "") or ""
+    if content.get("encoding") == "base64":
+        body = _decode(body, True)
+    parts = urlsplit(req.get("url", ""))
+    return HttpExchange(
+        id=i,
+        method=req.get("method", "GET").upper(),
+        url=req.get("url", ""),
+        host=parts.hostname or "",
+        path=parts.path or "/",
+        query=parts.query,
+        request_headers={h["name"]: h["value"] for h in req.get("headers", [])},
+        request_body=((req.get("postData") or {}).get("text") or "")[:MAX_BODY],
+        status=int(resp.get("status", 0) or 0),
+        response_headers={h["name"]: h["value"] for h in resp.get("headers", [])},
+        response_body=body[:MAX_BODY],
+        mime=(content.get("mimeType") or "").lower(),
+    )
 
 
 def parse_export(data: str, filename: str = "") -> list[HttpExchange]:

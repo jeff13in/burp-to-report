@@ -59,12 +59,15 @@ def extract_json(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     try:
-        return json.loads(text)
+        obj = json.loads(text)
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
+        if start < 0 or end <= start:
+            raise
+        obj = json.loads(text[start:end + 1])
+    if not isinstance(obj, dict):
+        raise ValueError(f"expected a JSON object, got {type(obj).__name__}")
+    return obj
 
 
 class LLMClient:

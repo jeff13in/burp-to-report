@@ -30,7 +30,7 @@ Burp XML / HAR ──► parse ──► noise filter ──► heuristic detect
 
 ### Privacy and safety
 
-- **Credentials are redacted before traffic leaves the machine.** `Authorization`, `Cookie`, `Set-Cookie` and API-key headers become stable placeholders (`<redacted:4c2edc2a>`), so the model can still tell sessions apart. JWT payload claims stay visible because IDOR review needs to know whose session it is.
+- **Credentials are redacted before traffic leaves the machine.** Secret headers (`Authorization`, `Cookie`, `Set-Cookie`, API-key and CSRF headers), secret fields in JSON bodies and query/form parameters (`password`, `token`, `api_key`, …), bare JWTs, AWS keys and private keys become stable placeholders (`<redacted:4c2edc2a>`), so the model can still tell sessions apart. Those values are also masked wherever else they appear, for example a password reflected into a page. JWT payload claims stay visible because IDOR review needs to know whose session it is.
 - **Privacy mode** runs a Meta open-weights model locally through any OpenAI-compatible server (Ollama, vLLM, llama.cpp), so client traffic never leaves the tester's machine.
 - Projects live in memory only. Nothing is written to disk.
 - The tool reads captured traffic. It never sends requests to the target, and the model is instructed not to produce exploit payloads.
@@ -52,7 +52,8 @@ npm install
 npm run dev                    # http://localhost:5173
 ```
 
-Or as one container: `docker build -t b2r . && docker run -p 8000:8000 -e META_API_KEY=... b2r`, then open http://localhost:8000.
+Or as one container: `docker build -t b2r . && docker run -p 127.0.0.1:8000:8000 -e META_API_KEY=... b2r`, then open http://localhost:8000.
+The API has no login, so keep it bound to localhost: anyone who can reach the port can upload traffic and read a project if they have its id.
 
 Click **Try the ShopLab demo** to analyze the bundled sample without exporting anything.
 
@@ -75,7 +76,15 @@ META_API_KEY=... python eval/run_eval.py      # with Muse Spark
 
 Heuristics-only result on ShopLab: 7/7 planted issues found, 0 false positives, 18 requests reduced to 15 after noise filtering.
 
-**Caveat:** the detectors and this sample were written together, so this score shows the pipeline works end to end, not how it generalizes. The next step is running it against exports from intentionally vulnerable apps (OWASP Juice Shop, crAPI, PortSwigger labs) and reporting planted-bug recall there.
+**Caveat:** the detectors and this sample were written together, so this score shows the pipeline works end to end, not how it generalizes.
+
+`samples/juiceshop.har` is two-customer traffic recorded against a local OWASP Juice Shop 20.3 (`python eval/capture_juiceshop.py`), with 7 known challenges as ground truth:
+
+```bash
+python eval/run_eval.py --sample samples/juiceshop.har --truth samples/juiceshop_truth.resolved.json
+```
+
+Heuristics-only result on Juice Shop: 4/7 found, 0 false positives. Missed: the open `/ftp` directory listing, unauthenticated `/metrics`, and the MD5 password hash inside the login JWT.
 
 ## Tests
 
@@ -83,7 +92,7 @@ Heuristics-only result on ShopLab: 7/7 planted issues found, 0 false positives, 
 cd backend && pytest -q
 ```
 
-12 tests cover parsing, filtering, each detector against planted bugs and decoys, credential redaction, evidence and citation validation, model suppression of a false positive, fallback when the model returns 503, downgrading of ungrounded model claims, and the full API flow.
+26 tests cover parsing (including malformed uploads), filtering, each detector against planted bugs and decoys, credential redaction in headers, bodies, model prompts and reports, malformed model replies, evidence and citation validation, model suppression of a false positive, fallback when the model returns 503, downgrading of ungrounded model claims, and the full API flow.
 
 ## Project layout
 

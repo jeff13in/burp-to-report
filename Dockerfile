@@ -13,5 +13,7 @@ COPY backend/ backend/
 COPY samples/ samples/
 COPY --from=ui /ui/dist frontend/dist
 WORKDIR /app/backend
+RUN useradd --system --no-create-home b2r
+USER b2r
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
